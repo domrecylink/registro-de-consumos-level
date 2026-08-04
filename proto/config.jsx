@@ -20,6 +20,8 @@ const ConfigView = () => {
       setConfirmModal({ type: "deactivate", suc });
     } else {
       dispatch({ type: "CONFIG/TOGGLE_ACTIVE", id: suc.id });
+      // El reducer invierte `activa`; persistimos el resultado en la acción.
+      rcSaveSucursal({ ...suc, activa: true });
       dispatch({ type: "TOAST/SHOW", toast: { kind: "success", title: "Sucursal activada", body: `"${suc.nombre}" está disponible para registrar consumos.` } });
     }
   };
@@ -31,6 +33,7 @@ const ConfigView = () => {
 
   const confirmDeactivate = () => {
     dispatch({ type: "CONFIG/TOGGLE_ACTIVE", id: confirmModal.suc.id });
+    rcSaveSucursal({ ...confirmModal.suc, activa: false });
     dispatch({ type: "TOAST/SHOW", toast: { kind: "success", title: "Sucursal desactivada", body: `"${confirmModal.suc.nombre}" ya no aparecerá al registrar consumos.` } });
     setConfirmModal(null);
   };
@@ -38,11 +41,9 @@ const ConfigView = () => {
   const confirmDeleteSuc = () => {
     const { id, nombre } = confirmModal.suc;
     dispatch({ type: "CONFIG/DELETE_SUC", id });
-    // Borrado explícito del usuario → sí se elimina en el server (el sync
-    // automático nunca borra; solo esta acción manual lo hace).
-    try {
-      Promise.resolve(rcDeleteSucursal(id)).catch(e => console.error("[rc-sync] delete suc failed", e));
-    } catch (e) { console.error("[rc-sync] delete suc failed", e); }
+    // Borrado explícito del usuario → sí se elimina en el server. Ninguna otra
+    // ruta borra sucursales: el guardado automático solo hace upsert por ID.
+    rcRemoveSucursal(id);
     dispatch({ type: "TOAST/SHOW", toast: { kind: "success", title: "Sucursal eliminada", body: `"${nombre}" fue eliminada.` } });
     setConfirmModal(null);
   };

@@ -13,6 +13,7 @@ const ConfigEditView = () => {
   const [draft, setDraft] = React.useState(JSON.parse(JSON.stringify(original)));
   const [errors, setErrors] = React.useState({});
   const [confirmModal, setConfirmModal] = React.useState(null);
+  const [saving, setSaving] = React.useState(false);
 
   const updateDraft = (patch) => setDraft(d => ({ ...d, ...patch }));
   const updateItem = (type, patch) => {
@@ -78,8 +79,30 @@ const ConfigEditView = () => {
     return Object.keys(e).length === 0;
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!validate()) return;
+    // La validación de arriba mira la lista local, que puede estar desfasada:
+    // otro usuario pudo crear una sucursal con este nombre después de que
+    // cargamos. Los registros se vinculan a la sucursal por NOMBRE, así que dos
+    // con el mismo nombre dejan el lookup ambiguo. Revalidamos contra el Sheet.
+    setSaving(true);
+    try {
+      const fresh = await rcReadConfigSucursales();
+      const target = draft.nombre.trim().toLowerCase();
+      const dup = (fresh || []).find(
+        s => s.id !== draft.id && String(s.nombre || "").trim().toLowerCase() === target
+      );
+      if (dup) {
+        setErrors(e => ({ ...e, nombre: "Otro usuario ya creó una sucursal con este nombre" }));
+        return;
+      }
+    } catch (e) {
+      // Sin conexión al Sheet seguimos con la validación local; el upsert es
+      // por ID, así que en el peor caso queda un nombre repetido, no pérdida.
+      console.warn("[config-edit] no se pudo revalidar el nombre contra el Sheet", e);
+    } finally {
+      setSaving(false);
+    }
     // Sucursal nueva: no hay historial que renombrar/recalcular → guarda directo.
     if (isNew) { doSave(); return; }
     const nameChanged = draft.nombre.trim() !== original.nombre;
@@ -106,7 +129,11 @@ const ConfigEditView = () => {
     if (renameHistory) {
       dispatch({ type: "CONFIG/RENAME_HISTORY", oldName: original.nombre, newName: draft.nombre.trim() });
     }
-    dispatch({ type: "CONFIG/SAVE_SUC", suc: { ...draft, nombre: draft.nombre.trim() } });
+    const suc = { ...draft, nombre: draft.nombre.trim() };
+    dispatch({ type: "CONFIG/SAVE_SUC", suc });
+    // Persistencia en la acción, no por observador de estado: así una carga de
+    // la app nunca puede disparar una escritura al Sheet.
+    rcSaveSucursal(suc);
     dispatch({ type: "TOAST/SHOW", toast: {
       kind: "success",
       title: isNew ? "Sucursal creada" : "Cambios guardados",
@@ -208,8 +235,10 @@ const ConfigEditView = () => {
 
       {/* Footer actions */}
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, paddingBottom: 80 }}>
-        <Btn onClick={handleCancel}>Cancelar</Btn>
-        <Btn kind="primary" icon="check" onClick={handleSave}>Guardar cambios</Btn>
+        <Btn onClick={handleCancel} disabled={saving}>Cancelar</Btn>
+        <Btn kind="primary" icon="check" onClick={handleSave} disabled={saving}>
+          {saving ? "Verificando…" : "Guardar cambios"}
+        </Btn>
       </div>
 
       {/* ---- Confirmation modals ---- */}

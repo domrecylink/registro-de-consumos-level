@@ -174,6 +174,24 @@ const OnboardingView = () => {
 
   const handleCreate = () => {
     dispatch({ type: "CONFIG/CREATE_PROJECT", sucursales, items });
+    // Persistencia en la acción (el observador de configSucursales se eliminó).
+    // Se replica la misma forma que arma el reducer para CREATE_PROJECT, así lo
+    // que se guarda en el Sheet coincide con lo que queda en el estado.
+    const emptyItems = {
+      electricidad:  { activo: false, subcats: [] },
+      combustible:   { activo: false, subcats: [] },
+      agua:          { activo: false, subcats: [] },
+      refrigerantes: { activo: false, subcats: [] },
+    };
+    sucursales.forEach(s => {
+      rcSaveSucursal({
+        id: s.id,
+        nombre: (s.nombre || "").trim(),
+        direccion: s.direccion || "",
+        activa: true,
+        items: items[s.id] || emptyItems,
+      });
+    });
     dispatch({ type: "NAVIGATE", view: "landing" });
     dispatch({ type: "TOAST/SHOW", toast: { kind: "success", title: "Proyecto creado con éxito", body: sucursales.length + " sucursal" + (sucursales.length !== 1 ? "es" : "") + " configurada" + (sucursales.length !== 1 ? "s" : "") } });
   };

@@ -1196,7 +1196,7 @@ const Dashboard = () => {
         right={<>
           <Btn
             icon={state.recordsLoading ? "" : "refresh"}
-            onClick={() => window.rcRefreshDashboard && window.rcRefreshDashboard()}
+            onClick={() => window.rcRefreshFromSheet && window.rcRefreshFromSheet(true)}
             disabled={state.recordsLoading}
             title={state.recordsLastFetch ? "Última carga: " + new Date(state.recordsLastFetch).toLocaleTimeString("es-CL") : "Cargar datos"}
           >
@@ -1336,7 +1336,7 @@ const DashboardEmpty = () => {
         right={
           <Btn
             icon={state.recordsLoading ? "" : "refresh"}
-            onClick={() => window.rcRefreshDashboard && window.rcRefreshDashboard()}
+            onClick={() => window.rcRefreshFromSheet && window.rcRefreshFromSheet(true)}
             disabled={state.recordsLoading}
           >
             {state.recordsLoading

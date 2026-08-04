@@ -98,6 +98,83 @@ async function rcApiPost(body) {
   return data;
 }
 
+// ----- Sincronización por clave (sin clobber entre usuarios) --------------
+// Antes cada hoja se guardaba con clear + reescritura completa desde el estado
+// en memoria de UN cliente: si otra persona tenía la app abierta y guardaba
+// algo, la siguiente escritura de este cliente lo borraba sin aviso.
+//
+// Ahora se envían SOLO las filas que cambiaron respecto a la línea base (lo
+// que realmente había en la hoja al leerla). Las filas de los demás no se
+// tocan porque nunca viajan en el payload.
+//
+// Las columnas clave deben coincidir con KEYED_SHEETS en apps-script.gs.
+const RC_KEYED = {
+  "Emisiones":        [0, 1, 2],  // Scope | Sucursal ID | Key
+  "Medidores":        [0],        // ID
+  "Lecturas Medidor": [1, 2],     // Medidor ID | Período
+  "Precios Medidor":  [0, 1, 2],  // Sucursal | Tipo | Período
+};
+
+const RC_SEP = "\u0000";   // separador imposible en un valor de celda
+
+function rcRowKey(row, keyCols) {
+  return keyCols.map((c) => String(row[c] == null ? "" : row[c]).trim()).join(RC_SEP);
+}
+
+// filas → Map(clave → fila).
+function rcKeyRows(rows, keyCols) {
+  const m = new Map();
+  (rows || []).forEach((r) => m.set(rcRowKey(r, keyCols), r));
+  return m;
+}
+
+// Línea base por hoja: lo que había en el Sheet la última vez que lo leímos o
+// escribimos. Se arma con la MISMA función de aplanado que usa la escritura,
+// así las diferencias de normalización del estado en memoria no producen
+// escrituras espurias.
+const RC_BASELINE = {};
+
+function rcArmBaseline(sheet, rows) {
+  RC_BASELINE[sheet] = rcKeyRows(rows, RC_KEYED[sheet] || [0]);
+}
+
+// Marca la hoja como "sin línea base": el próximo pase del effect la re-arma
+// con el estado actual y no escribe nada. Se usa al recargar del Sheet.
+function rcResetBaseline(sheet) { delete RC_BASELINE[sheet]; }
+
+// Hojas con escritura pendiente. Bloquea el refresco automático para no
+// descartar cambios locales que aún no llegaron al Sheet.
+const RC_DIRTY = new Set();
+function rcHasPendingWrites() { return RC_DIRTY.size > 0; }
+
+// Diffea contra la línea base y envía solo altas/cambios/bajas. Devuelve
+// { upserted, deleted } o null si no había nada que mandar.
+async function rcSyncKeyedSheet(sheet, rows) {
+  if (!rcEndpointConfigured()) return null;
+  const keyCols = RC_KEYED[sheet];
+  if (!keyCols) throw new Error("hoja no sincronizable por clave: " + sheet);
+  const next = rcKeyRows(rows, keyCols);
+  const prev = RC_BASELINE[sheet] || new Map();
+
+  const upserts = [];
+  next.forEach((row, k) => {
+    const p = prev.get(k);
+    if (p === undefined || JSON.stringify(p) !== JSON.stringify(row)) upserts.push(row);
+  });
+  const deletes = [];
+  prev.forEach((row, k) => {
+    if (!next.has(k)) deletes.push(keyCols.map((c) => row[c]));
+  });
+
+  if (!upserts.length && !deletes.length) {
+    RC_BASELINE[sheet] = next;
+    return null;
+  }
+  const res = await rcApiPost({ action: "syncKeyed", sheet, upserts, deletes });
+  RC_BASELINE[sheet] = next;   // recién al confirmar: si falla, se reintenta
+  return res;
+}
+
 // ----- Parsing utilities --------------------------------------------------
 
 function rcParseDate(s) {
@@ -176,6 +253,17 @@ function rcFlattenConfig(sucursales) {
     CONFIG_ITEM_TYPES.forEach((type) => {
       const item = suc.items && suc.items[type];
       if (!item || !item.activo) return;
+      // Tipo activo SIN subcategorías: se escribe una fila con el tipo y el
+      // resto vacío. Antes no se escribía nada y al recargar el tipo volvía
+      // como inactivo — leer y escribir no daban el mismo resultado.
+      if (!(item.subcats || []).length) {
+        rows.push([
+          suc.id, suc.nombre, suc.direccion || "", suc.activa ? "Sí" : "No",
+          type, "", "", "", "", "", "", "", "", "",
+        ]);
+        pushed = true;
+        return;
+      }
       (item.subcats || []).forEach((sc) => {
         rows.push([
           suc.id, suc.nombre, suc.direccion || "", suc.activa ? "Sí" : "No",
@@ -228,6 +316,11 @@ function rcUnflattenConfig(rows) {
     const item = byId.get(sucId).items[type];
     if (!item) return;
     item.activo = true;
+    // Fila de "tipo activo sin subcategorías": marca el tipo como activo pero
+    // no inventa una subcategoría vacía.
+    const hasSubcatData = [5, 6, 7, 8, 9, 10, 11, 12, 13]
+      .some((i) => String(r[i] == null ? "" : r[i]).trim() !== "");
+    if (!hasSubcatData) return;
     const sc = { id: r[5] || ("sc" + item.subcats.length) };
     if (r[6])  sc.sistemaElectrico = r[6];
     if (r[7])  sc.tipo = r[7];
@@ -248,17 +341,10 @@ async function rcReadConfigSucursales() {
   return rcUnflattenConfig((data && data.rows) || []);
 }
 
-async function rcWriteConfigSucursales(sucursales) {
-  if (!rcEndpointConfigured()) return;
-  await rcApiPost({ action: "setConfigSucursales", rows: rcFlattenConfig(sucursales) });
-}
-
-// Snapshot { id -> JSON } de la lista de sucursales, para diffear cambios.
-function rcSnapshotSucursales(list) {
-  const m = new Map();
-  (list || []).forEach((s) => { if (s && s.id) m.set(s.id, JSON.stringify(s)); });
-  return m;
-}
+// rcWriteConfigSucursales() se eliminó: mandaba la lista completa a una acción
+// que hacía clear + reescritura del Sheet. Cualquier pestaña con estado parcial
+// borraba las sucursales de los demás. La acción tampoco existe ya en el
+// backend. Se persiste por sucursal, con rcUpsertSucursal / rcDeleteSucursal.
 
 // Inserta/actualiza SOLO una sucursal (por ID). No pisa las de otros usuarios.
 async function rcUpsertSucursal(suc) {
@@ -270,6 +356,45 @@ async function rcUpsertSucursal(suc) {
 async function rcDeleteSucursal(id) {
   if (!rcEndpointConfigured() || !id) return;
   await rcApiPost({ action: "deleteSucursal", id: id });
+}
+
+// ----- Persistencia de sucursales: se guarda en la ACCIÓN del usuario -------
+// Antes StoreBridge observaba configSucursales y diffeaba contra una foto
+// guardada en un ref. Esa foto se tomaba antes de que React aplicara el
+// CONFIG/LOAD, así que salía vacía y CADA carga de la app concluía "todas las
+// sucursales son nuevas" y reescribía la tabla entera sin que nadie tocara
+// nada. Guardando en el punto donde el usuario confirma, una carga no puede
+// disparar una escritura: cargar no es una acción de guardado.
+//
+// Llamar desde los componentes justo después de despachar la acción.
+function rcSaveSucursal(suc) {
+  if (!suc || !suc.id) return;
+  RC_DIRTY.add("suc:" + suc.id);
+  Promise.resolve(rcUpsertSucursal(suc))
+    .then(() => console.log("[rc-sync] sucursal guardada", suc.id))
+    .catch((e) => {
+      console.error("[rc-sync] upsert suc failed", e);
+      rcToast("error", "No se pudo guardar la sucursal", e && e.message);
+    })
+    .finally(() => RC_DIRTY.delete("suc:" + suc.id));
+}
+
+function rcRemoveSucursal(id) {
+  if (!id) return;
+  RC_DIRTY.add("suc:" + id);
+  Promise.resolve(rcDeleteSucursal(id))
+    .then(() => console.log("[rc-sync] sucursal borrada", id))
+    .catch((e) => {
+      console.error("[rc-sync] delete suc failed", e);
+      rcToast("error", "No se pudo borrar la sucursal", e && e.message);
+    })
+    .finally(() => RC_DIRTY.delete("suc:" + id));
+}
+
+// Toast desde fuera de React (el store se expone en window.__rcStoreRef).
+function rcToast(kind, title, body) {
+  const { dispatch } = window.__rcStoreRef || {};
+  if (dispatch) dispatch({ type: "TOAST/SHOW", toast: { kind, title, body: body || "" } });
 }
 
 // ----- Emisiones (hoja "Emisiones") -------------------------------------
@@ -381,9 +506,11 @@ async function rcReadEmissions() {
   return rcUnflattenEmissions(rows);
 }
 
+// Guarda solo los factores/metas/refrigerantes que cambiaron. Lo que otro
+// usuario haya guardado en paralelo no viaja en el payload → no se pisa.
 async function rcWriteEmissions(emissions) {
   if (!rcEndpointConfigured()) return;
-  await rcApiPost({ action: "setEmissions", rows: rcFlattenEmissions(emissions) });
+  return await rcSyncKeyedSheet("Emisiones", rcFlattenEmissions(emissions));
 }
 
 // ----- Medidores (hojas "Medidores" / "Lecturas Medidor" / "Precios Medidor") --
@@ -484,11 +611,13 @@ async function rcReadMedidores() {
   return { meters, readings, prices, docs };
 }
 
+// Igual que emisiones: diff por clave sobre las tres hojas. Un cliente con
+// estado viejo ya no puede borrar las lecturas que otro acaba de registrar.
 async function rcWriteMedidores(M) {
   if (!rcEndpointConfigured()) return;
-  await rcApiPost({ action: "setMedidores",        rows: rcFlattenMedidores(M.meters) });
-  await rcApiPost({ action: "setLecturasMedidor",  rows: rcFlattenMedLecturas(M.readings, M.docs) });
-  await rcApiPost({ action: "setPreciosMedidor",   rows: rcFlattenMedPrecios(M.prices) });
+  await rcSyncKeyedSheet("Medidores",        rcFlattenMedidores(M.meters));
+  await rcSyncKeyedSheet("Lecturas Medidor", rcFlattenMedLecturas(M.readings, M.docs));
+  await rcSyncKeyedSheet("Precios Medidor",  rcFlattenMedPrecios(M.prices));
 }
 
 // Sube un documento (Factura/Pago/Respaldo) de medidor a su carpeta Drive. Sin
@@ -530,6 +659,46 @@ async function rcDeleteMedidorDoc(fileId) {
 
 // ----- Read all records ---------------------------------------------------
 
+// Clave estable de la fila, leída de la columna "ID" (la última de cada hoja
+// de registros). Antes el id era el índice de la fila en la lectura, así que
+// borrar u ordenar filas a mano en la planilla desalineaba a todos los
+// clientes abiertos y la siguiente edición caía en la fila equivocada.
+//
+// Sin ID (fila agregada a mano, o hoja anterior a v5 sin backfill) se devuelve
+// un id "noid-*": la app lo muestra igual, pero rcResolveSheetCell se niega a
+// editarlo hasta que ensureRecordIds() le asigne uno.
+function rcRecordUid(cell, i) {
+  const v = String(cell == null ? "" : cell).trim();
+  return v !== "" ? v : "noid-" + i;
+}
+
+// Rellena los ID faltantes en las hojas de registros. Idempotente: sin huecos
+// no escribe. Se corre antes de la primera lectura y en cada refresco, así una
+// fila que agregues a mano queda editable desde la app.
+async function rcEnsureRecordIds() {
+  if (!rcEndpointConfigured()) return null;
+  const res = await rcApiPost({ action: "ensureRecordIds" });
+  const filled = (res && res.filled) || {};
+  const total = Object.keys(filled).reduce((n, k) => n + (filled[k] || 0), 0);
+  if (total) console.log("[rc-sync] IDs asignados a filas sin ID:", filled);
+
+  // El backend se niega a usar la columna ID de una hoja si ahí hay datos
+  // ajenos. Sin aviso, esa hoja quedaría sin IDs y sus registros no se podrían
+  // editar desde la app, sin explicación visible.
+  const blocked = (res && res.blocked) || {};
+  const names = Object.keys(blocked);
+  if (names.length) {
+    console.warn("[rc-sync] hojas sin columna ID disponible:", blocked);
+    const detalle = names.map((n) => n + " (columna " + blocked[n].columna + ")").join(", ");
+    rcToast(
+      "warning",
+      "Falta liberar una columna en la planilla",
+      detalle + ". Mueve esos datos a otra columna para poder editar esos registros desde la app."
+    );
+  }
+  return res;
+}
+
 async function rcReadAllRecords() {
   if (!rcEndpointConfigured()) return [];
   const data = await rcApiGet({ action: "read" });
@@ -541,10 +710,8 @@ async function rcReadAllRecords() {
     if (!fecha && !consumo) return;
     const subcat = rcCombSubcat(tipo);
     records.push({
-      id: "comb-" + i,
+      id: "comb-" + rcRecordUid(row[10], i),
       _sheetName: "Combustible",
-      _sheetRow: i + 2,
-      _estadoCol: 9,
       date: rcParseDate(fecha),
       sucursal: sucursal || "",
       type: "combustible",
@@ -564,10 +731,8 @@ async function rcReadAllRecords() {
     const costo = row[4], sucursal = row[6], proveedor = row[8], estadoLbl = row[9], origenLbl = row[10];
     if (!fecha && !consumo) return;
     records.push({
-      id: "elec-" + i,
+      id: "elec-" + rcRecordUid(row[11], i),
       _sheetName: "Electricidad",
-      _sheetRow: i + 2,
-      _estadoCol: 10,
       date: rcParseDate(fecha),
       sucursal: sucursal || "",
       type: "electricidad",
@@ -588,10 +753,8 @@ async function rcReadAllRecords() {
     const costo = row[4], sucursal = row[6], proveedor = row[8], subcatLbl = row[9], estadoLbl = row[10], origenLbl = row[11];
     if (!fecha && !consumo) return;
     records.push({
-      id: "agua-" + i,
+      id: "agua-" + rcRecordUid(row[12], i),
       _sheetName: "Agua",
-      _sheetRow: i + 2,
-      _estadoCol: 11,
       date: rcParseDate(fecha),
       sucursal: sucursal || "",
       type: "agua",
@@ -878,7 +1041,11 @@ function rcFotoToConsumptionRow(fotoRow, patch) {
 
 async function rcCompleteFoto({ fileId, rowIndex, patch, fotoRow }) {
   if (!rcEndpointConfigured()) throw new Error("Backend no configurado.");
-  if (!rowIndex) throw new Error("rowIndex requerido");
+  // Se ubica la fila por el File ID de Drive (columna 1 de la hoja Fotos), que
+  // ya es único por foto. Antes se escribía por número de fila calculado en la
+  // lectura: si alguien borraba u ordenaba filas de la cola a mano, los datos
+  // completados terminaban en la foto equivocada.
+  if (!fileId && !rowIndex) throw new Error("fileId o rowIndex requerido");
   const now = new Date().toISOString();
   // Columnas que actualizamos (col index 1-based en hoja Fotos).
   // Incluye tipo/sucursal/periodo para reflejar ediciones hechas en el form
@@ -897,7 +1064,11 @@ async function rcCompleteFoto({ fileId, rowIndex, patch, fotoRow }) {
     [14, patch.notas     || ""],
   ];
   for (const [col, value] of cells) {
-    await rcApiPost({ action: "update", sheet: FOTOS_SHEET, row: rowIndex, col, value });
+    if (fileId) {
+      await rcApiPost({ action: "updateById", sheet: FOTOS_SHEET, id: fileId, col, value });
+    } else {
+      await rcApiPost({ action: "update", sheet: FOTOS_SHEET, row: rowIndex, col, value });
+    }
   }
   // Migrar copia a la hoja de consumo (Combustible/Electricidad/Agua) para
   // que aparezca en el dashboard.
@@ -942,12 +1113,19 @@ async function rcAttachDocumentToRecord(rec, file) {
     base64,
     folderId,
   });
+  // Igual que la edición inline: la celda se ubica por el ID de la fila, no por
+  // su posición. El archivo ya quedó en Drive, así que si la fila no existe solo
+  // se avisa — no se reintenta contra una fila adivinada.
   const target = rcResolveSheetCell(rec.id, "link");
-  if (target) {
+  if (target && target.needsId) {
+    console.warn("[rc-sync] attach: fila sin ID, no se actualiza la celda Link:", rec.id);
+    rcToast("warning", "Archivo subido", "No se pudo enlazar en la planilla: la fila no tiene ID. Recarga y reintenta.");
+  } else if (target) {
     try {
-      await rcApiPost({ action: "update", sheet: target.sheet, row: target.row, col: target.col, value: up.link });
+      await rcApiPost({ action: "updateById", sheet: target.sheet, id: target.id, col: target.col, value: up.link });
     } catch (e) {
       console.warn("[rc-sync] attach: update link cell failed", e);
+      rcToast("warning", "Archivo subido", "No se pudo enlazar en la planilla: " + (e.message || ""));
     }
   }
   return up;
@@ -1078,24 +1256,31 @@ async function rcHandleConfirm(ev) {
 window.addEventListener("rc:confirm", rcHandleConfirm);
 
 // ----- Inline edit sync ---------------------------------------------------
-// id format from rcReadAllRecords: "comb-{i}" / "elec-{i}" / "agua-{i}",
-// where i is the 0-based index AFTER the header row. Sheet row (1-based)
-// = i + 2. Columns (1-based) match the layouts in CONFIG.HEADERS:
+// El id que arma rcReadAllRecords es "comb-{uid}" / "elec-{uid}" / "agua-{uid}",
+// donde uid es el valor de la columna "ID" de esa fila. El backend ubica la
+// fila por ese uid (acción "updateById"), no por número de fila: así se puede
+// borrar, ordenar o insertar filas a mano en la planilla sin que las ediciones
+// terminen en la fila equivocada.
+//
+// Las columnas (1-based) siguen los layouts de WEB_CFG.HEADERS:
 //   Combustible  → Consumo=3, Costo=4
 //   Electricidad → Consumo total=4, Costo=5
 //   Agua         → Consumo total=4, Costo=5
 function rcResolveSheetCell(id, field) {
-  const m = /^(comb|elec|agua)-(\d+)$/.exec(id || "");
+  const m = /^(comb|elec|agua)-(.+)$/.exec(id || "");
   if (!m) return null;
   const kind = m[1];
-  const row = parseInt(m[2], 10) + 2;
+  const uid = m[2];
+  // Fila sin ID todavía: no se edita a ciegas. Se resuelve solo cuando
+  // ensureRecordIds() le asigna uno (ocurre en la carga y en cada refresco).
+  if (uid.indexOf("noid-") === 0) return { needsId: true };
   const COLS = {
     comb: { link: 1, date: 2, cantidad: 3, costo: 4, subcat: 7, provider: 8, estado: 9,  sheet: RC_CONFIG.SHEETS.COMBUSTIBLE },
     elec: { link: 1, date: 3, cantidad: 4, costo: 5,             provider: 9, estado: 10, sheet: RC_CONFIG.SHEETS.ELECTRICIDAD },
     agua: { link: 1, date: 3, cantidad: 4, costo: 5, subcat: 10, provider: 9, estado: 11, sheet: RC_CONFIG.SHEETS.AGUA },
   }[kind];
   if (!COLS || !COLS[field]) return null;
-  return { sheet: COLS.sheet, row, col: COLS[field] };
+  return { sheet: COLS.sheet, id: uid, col: COLS[field] };
 }
 
 async function rcHandleEdit(ev) {
@@ -1106,21 +1291,111 @@ async function rcHandleEdit(ev) {
     console.warn("[rc-sync] edit ignored — record not from sheets:", id, field);
     return;
   }
+  if (target.needsId) {
+    const msg = "Esta fila todavía no tiene ID en la planilla. Recarga para asignarlo.";
+    console.warn("[rc-sync] edit ignored — fila sin ID:", id);
+    rcToast("error", "No se pudo guardar la edición", msg);
+    window.dispatchEvent(new CustomEvent("rc:edit-done", { detail: { ok: false, msg } }));
+    return;
+  }
   // La fecha viaja como ISO (YYYY-MM-DD) desde la UI; la escribimos en el
   // mismo formato DD-MM-YY que usan los registros manuales (rcParseDate lo lee).
   const outValue = field === "date" ? fmtDDMMYY(value) : value;
   try {
-    await rcApiPost({ action: "update", sheet: target.sheet, row: target.row, col: target.col, value: outValue });
-    console.log("[rc-sync] cell updated", target, "=", value);
+    const res = await rcApiPost({
+      action: "updateById", sheet: target.sheet, id: target.id, col: target.col, value: outValue,
+    });
+    console.log("[rc-sync] cell updated", target.sheet, "fila", res && res.row, target.col, "=", value);
     window.dispatchEvent(new CustomEvent("rc:edit-done", { detail: { ok: true } }));
   } catch (e) {
     console.error("[rc-sync] cell update failed", e);
+    // "registro no encontrado" = la fila se borró en la planilla. El backend NO
+    // escribió nada; antes, con índices, habría pisado otra fila en silencio.
+    const gone = /registro no encontrado/i.test(e.message || "");
+    rcToast(
+      "error",
+      "No se pudo guardar la edición",
+      gone ? "Esa fila ya no existe en la planilla. Recarga los datos." : (e.message || "")
+    );
     window.dispatchEvent(new CustomEvent("rc:edit-done", { detail: { ok: false, msg: e.message } }));
   }
 }
 window.addEventListener("rc:edit", rcHandleEdit);
 
 // ----- React helpers ------------------------------------------------------
+
+// Carga config + emisiones + notif + medidores desde el Sheet. La usan el
+// bootstrap inicial y el refresco al volver a la pestaña.
+//
+// ORDEN IMPORTANTE: el flag __rc*Bootstrapped se pone ANTES del dispatch. El
+// effect que sincroniza esa hoja se dispara con el LOAD y, al verse habilitado,
+// arma su línea base con el estado ya cargado. Si el flag se pusiera después
+// (como antes), ese primer pase se descartaba y la línea base terminaba
+// armándose con el PRIMER CAMBIO del usuario — o peor, quedaba vacía y cada
+// carga de la app concluía "todo es nuevo" y reescribía las hojas completas.
+async function rcLoadDomains() {
+  const dispatchNow = () => (window.__rcStoreRef || {}).dispatch;
+
+  // 1) Configuración de sucursales
+  try {
+    const cfg = await rcReadConfigSucursales();
+    const dispatch = dispatchNow();
+    if (dispatch && cfg && Array.isArray(cfg) && cfg.length > 0) {
+      dispatch({ type: "CONFIG/LOAD", configSucursales: cfg });
+    }
+  } catch (e) {
+    console.warn("[rc-sync] config load failed", e);
+    // Antes fallaba en silencio: la app arrancaba sin sucursales y parecía que
+    // se habían borrado. Ahora se avisa.
+    rcToast("error", "No se pudieron cargar las sucursales", e && e.message);
+  }
+  window.__rcConfigBootstrapped = true;
+
+  // 2) Factores de emisión
+  window.__rcEmissionsBootstrapped = true;
+  try {
+    const em = await rcReadEmissions();
+    const dispatch = dispatchNow();
+    if (dispatch && em && rcEmissionsHasContent(em)) {
+      // Descartar la línea base antes del LOAD: el effect la re-arma con lo
+      // recién leído, así un refresco no se interpreta como cambio del usuario.
+      rcResetBaseline("Emisiones");
+      dispatch({ type: "EMIS/LOAD", emissions: em });
+    }
+  } catch (e) {
+    console.warn("[rc-sync] emissions load failed", e);
+    rcToast("error", "No se pudieron cargar los factores de emisión", e && e.message);
+  }
+
+  // 3) Emails de notificación cola fotos
+  window.__rcNotifBootstrapped = true;
+  try {
+    const emails = await rcReadFotoNotifEmails();
+    const dispatch = dispatchNow();
+    if (dispatch) dispatch({ type: "NOTIF/LOAD", emails });
+  } catch (e) {
+    console.warn("[rc-sync] notif emails load failed", e);
+  }
+
+  // 4) Medidores
+  window.__rcMedidoresBootstrapped = true;
+  try {
+    const med = await rcReadMedidores();
+    const dispatch = dispatchNow();
+    if (dispatch && med && (med.meters.length || med.readings.length || med.prices.length || Object.keys(med.docs).length)) {
+      rcResetBaseline("Medidores");
+      rcResetBaseline("Lecturas Medidor");
+      rcResetBaseline("Precios Medidor");
+      dispatch({ type: "MED/LOAD", ...med });
+    }
+  } catch (e) {
+    console.warn("[rc-sync] medidores load failed", e);
+    rcToast("error", "No se pudieron cargar los medidores", e && e.message);
+  } finally {
+    const dispatch = dispatchNow();
+    if (dispatch) dispatch({ type: "MED/SET_LOADING", loading: false });
+  }
+}
 
 // Bootstrap: cargar registros + configSucursales desde Sheets al iniciar.
 const SyncBootstrap = () => {
@@ -1133,75 +1408,83 @@ const SyncBootstrap = () => {
         if (dispatch) dispatch({ type: "MED/SET_LOADING", loading: false });
         return;
       }
-      // 1) Registros (comportamiento anterior)
+      // Antes de leer: asegurar que toda fila tenga ID. Cubre las filas previas
+      // a v5 y las que se hayan agregado a mano en la planilla.
+      try {
+        await rcEnsureRecordIds();
+      } catch (e) {
+        console.warn("[rc-sync] ensureRecordIds failed", e);
+      }
       await rcRefreshDashboard();
-      // 2) Configuración de sucursales
-      try {
-        const cfg = await rcReadConfigSucursales();
-        if (cfg && Array.isArray(cfg) && cfg.length > 0) {
-          const { dispatch } = window.__rcStoreRef || {};
-          if (dispatch) {
-            window.__rcLoadedConfigJson = JSON.stringify(cfg);
-            dispatch({ type: "CONFIG/LOAD", configSucursales: cfg });
-          }
-        }
-      } catch (e) {
-        console.warn("[rc-sync] config load failed", e);
-      }
-      window.__rcConfigBootstrapped = true;
-      // Arma la línea base de sucursales en StoreBridge (estado ya cargado).
-      window.dispatchEvent(new CustomEvent("rc:config-bootstrapped"));
-
-      // 3) Factores de emisión
-      try {
-        const em = await rcReadEmissions();
-        if (em && rcEmissionsHasContent(em)) {
-          const { dispatch } = window.__rcStoreRef || {};
-          if (dispatch) {
-            window.__rcLoadedEmissionsJson = JSON.stringify(em);
-            dispatch({ type: "EMIS/LOAD", emissions: em });
-          }
-        }
-      } catch (e) {
-        console.warn("[rc-sync] emissions load failed", e);
-      }
-      window.__rcEmissionsBootstrapped = true;
-
-      // 4) Emails de notificación cola fotos
-      try {
-        const emails = await rcReadFotoNotifEmails();
-        const { dispatch } = window.__rcStoreRef || {};
-        if (dispatch) {
-          window.__rcLoadedNotifJson = JSON.stringify(emails);
-          dispatch({ type: "NOTIF/LOAD", emails });
-        }
-      } catch (e) {
-        console.warn("[rc-sync] notif emails load failed", e);
-      }
-      window.__rcNotifBootstrapped = true;
-
-      // 5) Medidores
-      try {
-        const med = await rcReadMedidores();
-        if (med && (med.meters.length || med.readings.length || med.prices.length || Object.keys(med.docs).length)) {
-          const { dispatch } = window.__rcStoreRef || {};
-          if (dispatch) {
-            window.__rcLoadedMedidoresJson = JSON.stringify(med);
-            dispatch({ type: "MED/LOAD", ...med });
-          }
-        }
-      } catch (e) {
-        console.warn("[rc-sync] medidores load failed", e);
-      } finally {
-        const { dispatch } = window.__rcStoreRef || {};
-        if (dispatch) dispatch({ type: "MED/SET_LOADING", loading: false });
-      }
-      window.__rcMedidoresBootstrapped = true;
+      await rcLoadDomains();
     }
     init();
   }, []);
   return null;
 };
+
+// Refresco al volver a la pestaña. Sin esto un cliente se queda con la foto
+// que leyó al abrir durante toda la sesión: mientras más vieja, más desfasado
+// lo que muestra (y lo que decide el usuario sobre esos datos).
+//
+// MED/LOAD y EMIS/LOAD reemplazan su slice, así que solo se refresca cuando no
+// hay escrituras en vuelo ni cambios locales sin confirmar — si no, se
+// descartaría trabajo del usuario.
+const RC_REFRESH_MIN_MS = 60000;
+
+// Recarga todo desde el Sheet. `force` salta el mínimo entre refrescos (lo usa
+// el botón "Recargar"), pero NUNCA salta la comprobación de escrituras
+// pendientes: MED/LOAD y EMIS/LOAD reemplazan su slice y descartarían cambios
+// locales que aún no llegaron al Sheet.
+let __rcLastRefresh = 0;
+let __rcRefreshing = false;
+
+async function rcRefreshFromSheet(force) {
+  if (!rcEndpointConfigured() || !window.__rcConfigBootstrapped) return false;
+  if (__rcRefreshing) return false;
+  if (rcHasPendingWrites()) {
+    if (force) rcToast("info", "Guardando cambios…", "Vuelve a intentar en unos segundos.");
+    return false;
+  }
+  const now = new Date().getTime();
+  if (!force && now - __rcLastRefresh < RC_REFRESH_MIN_MS) return false;
+  __rcLastRefresh = now;
+  __rcRefreshing = true;
+  try {
+    // Asigna ID a las filas que se hayan agregado a mano desde la última carga.
+    try { await rcEnsureRecordIds(); } catch (e) { console.warn("[rc-sync] ensureRecordIds failed", e); }
+    await rcRefreshDashboard();
+    await rcLoadDomains();
+    console.log("[rc-sync] datos recargados desde el Sheet");
+    return true;
+  } catch (e) {
+    console.warn("[rc-sync] refresh failed", e);
+    if (force) rcToast("error", "No se pudo recargar", e && e.message);
+    return false;
+  } finally {
+    __rcRefreshing = false;
+  }
+}
+
+const SyncRefresher = () => {
+  React.useEffect(() => {
+    const onFocus = () => {
+      if (document.visibilityState !== "visible") return;
+      rcRefreshFromSheet(false);
+    };
+    document.addEventListener("visibilitychange", onFocus);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      document.removeEventListener("visibilitychange", onFocus);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
+  return null;
+};
+
+// El botón "Refrescar" del dashboard llama a rcRefreshFromSheet(true): además
+// de los registros recarga config, emisiones y medidores, y asigna ID a las
+// filas que se hayan agregado a mano en la planilla.
 
 // Toast en respuesta a sync-done.
 const SyncToaster = () => {
@@ -1232,10 +1515,10 @@ const SyncToaster = () => {
   return null;
 };
 
-// Expone el store al handler y persiste configSucursales en Sheets.
+// Expone el store a los handlers y persiste emisiones / medidores / notif.
+// configSucursales se persiste en la acción del usuario, no acá.
 const StoreBridge = () => {
   const app = useApp();
-  const debounceRef = React.useRef(null);
   const emisDebounceRef = React.useRef(null);
 
   React.useEffect(() => {
@@ -1243,50 +1526,11 @@ const StoreBridge = () => {
     return () => { window.__rcStoreRef = null; };
   }, [app]);
 
-  // Línea base de sucursales para diffear. Se arma al terminar el bootstrap
-  // (evento "rc:config-bootstrapped") con el estado ya cargado del Sheet, para
-  // que el primer cambio del usuario se detecte como diff y no se trague.
-  const prevSucRef = React.useRef(null);
-  const sucArmedRef = React.useRef(false);
-  React.useEffect(() => {
-    const arm = () => {
-      const ref = window.__rcStoreRef;
-      prevSucRef.current = rcSnapshotSucursales((ref && ref.state && ref.state.configSucursales) || []);
-      sucArmedRef.current = true;
-      window.__rcLoadedConfigJson = undefined;
-    };
-    window.addEventListener("rc:config-bootstrapped", arm);
-    if (window.__rcConfigBootstrapped && !sucArmedRef.current) arm();
-    return () => window.removeEventListener("rc:config-bootstrapped", arm);
-  }, []);
-
-  // Guarda configSucursales en Sheets cuando cambia (debounce 800ms).
-  // Persiste SOLO lo que cambió (upsert/delete por ID) en vez de reescribir la
-  // lista completa, para no pisar sucursales de otros usuarios (concurrencia).
-  React.useEffect(() => {
-    if (!sucArmedRef.current) return;
-    const next = app.state.configSucursales || [];
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(async () => {
-      if (!rcEndpointConfigured()) return;
-      const prev = prevSucRef.current || new Map();
-      const curr = rcSnapshotSucursales(next);
-      const byId = new Map(next.map((s) => [s.id, s]));
-      try {
-        // SOLO upsert (altas + cambios) por ID. Nunca borra: si una sucursal
-        // desaparece del estado local (pestaña vieja, carga parcial, etc.) NO
-        // se elimina del server. Evita pérdida de proyectos antiguos.
-        for (const [id, jsonS] of curr) {
-          if (prev.get(id) !== jsonS) await rcUpsertSucursal(byId.get(id));
-        }
-        prevSucRef.current = curr;
-        console.log("[rc-sync] configSucursales sincronizada (upsert por ID, sin borrado)");
-      } catch (e) {
-        console.error("[rc-sync] config save failed", e);
-      }
-    }, 800);
-    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
-  }, [app.state.configSucursales]);
+  // configSucursales YA NO se observa acá. Se persiste en la acción del usuario
+  // (rcSaveSucursal / rcRemoveSucursal, llamadas desde config-edit / config /
+  // onboarding). El observador con foto-para-diffear era la causa de que cada
+  // carga de la app reescribiera la tabla completa: la foto se tomaba antes de
+  // que React aplicara el CONFIG/LOAD, salía vacía, y todo parecía nuevo.
 
   // Guarda emails de notificación cuando cambian (debounce 600ms).
   const notifDebounceRef = React.useRef(null);
@@ -1311,21 +1555,29 @@ const StoreBridge = () => {
   }, [app.state.fotoNotifEmails]);
 
   // Guarda emisiones en Sheets cuando cambian (debounce 800ms).
+  // El primer pase tras el bootstrap solo arma la línea base — con el estado ya
+  // cargado del Sheet — y no escribe. Se arma acá, sincrónicamente, y no dentro
+  // del setTimeout: si el usuario edita antes de que venza el debounce, la base
+  // ya quedó tomada del estado cargado y su edición se detecta como cambio.
   React.useEffect(() => {
     if (!window.__rcEmissionsBootstrapped) return;
-    const json = JSON.stringify(app.state.emissions);
+    const rows = rcFlattenEmissions(app.state.emissions);
+    if (RC_BASELINE["Emisiones"] === undefined) {
+      rcArmBaseline("Emisiones", rows);
+      return;
+    }
     if (emisDebounceRef.current) clearTimeout(emisDebounceRef.current);
     emisDebounceRef.current = setTimeout(async () => {
       if (!rcEndpointConfigured()) return;
-      if (window.__rcLoadedEmissionsJson === json) {
-        window.__rcLoadedEmissionsJson = undefined;
-        return;
-      }
+      RC_DIRTY.add("Emisiones");
       try {
-        await rcWriteEmissions(app.state.emissions);
-        console.log("[rc-sync] emisiones guardadas");
+        const res = await rcSyncKeyedSheet("Emisiones", rows);
+        if (res) console.log("[rc-sync] emisiones:", res.upserted, "upsert /", res.deleted, "borradas");
       } catch (e) {
         console.error("[rc-sync] emissions save failed", e);
+        rcToast("error", "No se pudieron guardar los factores", e && e.message);
+      } finally {
+        RC_DIRTY.delete("Emisiones");
       }
     }, 800);
     return () => { if (emisDebounceRef.current) clearTimeout(emisDebounceRef.current); };
@@ -1334,22 +1586,36 @@ const StoreBridge = () => {
   // Guarda medidores (meters/readings/prices/docs) en Sheets cuando cambian (debounce 900ms).
   const medDebounceRef = React.useRef(null);
   const med = app.state.medidores;
+  // Tres hojas, tres líneas base. Mismo criterio que emisiones: el primer pase
+  // tras el bootstrap solo arma y no escribe.
+  const MED_SHEETS = ["Medidores", "Lecturas Medidor", "Precios Medidor"];
   React.useEffect(() => {
     if (!window.__rcMedidoresBootstrapped) return;
     const slice = { meters: med.meters, readings: med.readings, prices: med.prices, docs: med.docs };
-    const json = JSON.stringify(slice);
+    const rowsBySheet = {
+      "Medidores":        rcFlattenMedidores(slice.meters),
+      "Lecturas Medidor": rcFlattenMedLecturas(slice.readings, slice.docs),
+      "Precios Medidor":  rcFlattenMedPrecios(slice.prices),
+    };
+    const unarmed = MED_SHEETS.filter((s) => RC_BASELINE[s] === undefined);
+    if (unarmed.length) {
+      unarmed.forEach((s) => rcArmBaseline(s, rowsBySheet[s]));
+      if (unarmed.length === MED_SHEETS.length) return;   // carga completa: no escribir
+    }
     if (medDebounceRef.current) clearTimeout(medDebounceRef.current);
     medDebounceRef.current = setTimeout(async () => {
       if (!rcEndpointConfigured()) return;
-      if (window.__rcLoadedMedidoresJson === json) {
-        window.__rcLoadedMedidoresJson = undefined;
-        return;
-      }
+      MED_SHEETS.forEach((s) => RC_DIRTY.add(s));
       try {
-        await rcWriteMedidores(slice);
-        console.log("[rc-sync] medidores guardados");
+        for (const s of MED_SHEETS) {
+          const res = await rcSyncKeyedSheet(s, rowsBySheet[s]);
+          if (res) console.log("[rc-sync] " + s + ":", res.upserted, "upsert /", res.deleted, "borradas");
+        }
       } catch (e) {
         console.error("[rc-sync] medidores save failed", e);
+        rcToast("error", "No se pudieron guardar los medidores", e && e.message);
+      } finally {
+        MED_SHEETS.forEach((s) => RC_DIRTY.delete(s));
       }
     }, 900);
     return () => { if (medDebounceRef.current) clearTimeout(medDebounceRef.current); };
@@ -1407,8 +1673,10 @@ const SyncStatus = () => {
 const SheetLink = () => null;
 
 Object.assign(window, {
-  StoreBridge, SyncBootstrap, SyncToaster, SyncStatus, SheetLink, RC_CONFIG,
-  rcReadConfigSucursales, rcWriteConfigSucursales, rcUpsertSucursal, rcDeleteSucursal, rcFlattenConfig, rcUnflattenConfig,
+  StoreBridge, SyncBootstrap, SyncRefresher, SyncToaster, SyncStatus, SheetLink, RC_CONFIG,
+  rcReadConfigSucursales, rcUpsertSucursal, rcDeleteSucursal, rcFlattenConfig, rcUnflattenConfig,
+  rcSaveSucursal, rcRemoveSucursal, rcSyncKeyedSheet, rcToast, rcLoadDomains,
+  rcRefreshFromSheet, rcEnsureRecordIds, rcResolveSheetCell, rcRecordUid,
   rcReadEmissions, rcWriteEmissions, rcFlattenEmissions, rcUnflattenEmissions,
   rcUploadFoto, rcReadFotos, rcCompleteFoto,
   rcReadFotoNotifEmails, rcWriteFotoNotifEmails, rcNotifyFotoPending,

@@ -1226,7 +1226,7 @@ const MedidoresView = () => {
       <SectionHead
         eyebrow="Medidores"
         title="Lecturas de medidores"
-        sub="Registra lecturas físicas por medidor, calcula consumo y costo, y compáralos con el consumo global registrado."
+        sub="Registra lecturas físicas por medidor, calcula consumo y costo, y compáralos con el consumo global registrado. Puedes configurar qué medidores son facturables y cuáles no. Estas lecturas y consumos no aportan al cálculo de impacto ambiental."
         right={
           <div className="prt-row" style={{ gap: 8 }}>
             {ready && meters.length > 0 && <Btn icon="file_download" onClick={() => medExportExcel(M, state.records, dispatch)}>Excel</Btn>}

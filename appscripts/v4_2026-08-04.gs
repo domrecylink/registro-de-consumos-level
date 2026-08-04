@@ -44,7 +44,7 @@
 // Versión del script desplegado. Subir en cada cambio; se devuelve en `ping`
 // para verificar por curl qué versión corre en el /exec (evita pegar un
 // archivo viejo). Snapshot congelado en appscripts/vN_fecha.gs.
-const SCRIPT_VERSION = "v5";
+const SCRIPT_VERSION = "v4";
 
 // WEB_CFG en vez de CONFIG porque el procesador de Combustible (archivo Código.gs
 // en el proyecto Apps Script) ya declara `var CONFIG`. Si usáramos el mismo nombre
@@ -61,14 +61,9 @@ const WEB_CFG = {
     FOTOS_PROCESADOS:   "1-CJqu2-qIiodYwh-KBkeuAnASzC0w4PP",
   },
   HEADERS: {
-    // "ID" va AL FINAL a propósito: agregarla no corre ninguna columna, así
-    // los índices que usan la app y los procesadores siguen siendo válidos.
-    // Es la clave estable de cada registro: permite borrar, ordenar e insertar
-    // filas a mano en la planilla sin que las ediciones de la app caigan en la
-    // fila equivocada. La rellena ensureRecordIds() / appendRows().
-    Combustible:    ["Link", "Fecha", "Consumo", "Costo", "Empresa", "Sucursal", "Tipo", "Proveedor", "Estado", "Origen", "ID"],
-    Electricidad:   ["Link PDF", "Número de cliente", "Fecha", "Consumo total", "Costo ($)", "Empresa", "Sucursal", "Tipo de consumo", "Proveedor", "Estado", "Origen", "ID"],
-    Agua:           ["Link PDF", "Número de cliente", "Fecha emisión", "Consumo total", "Costo ($)", "Empresa", "Sucursal", "Tipo de consumo", "Proveedor", "Subcategoría", "Estado", "Origen", "ID"],
+    Combustible:    ["Link", "Fecha", "Consumo", "Costo", "Empresa", "Sucursal", "Tipo", "Proveedor", "Estado", "Origen"],
+    Electricidad:   ["Link PDF", "Número de cliente", "Fecha", "Consumo total", "Costo ($)", "Empresa", "Sucursal", "Tipo de consumo", "Proveedor", "Estado", "Origen"],
+    Agua:           ["Link PDF", "Número de cliente", "Fecha emisión", "Consumo total", "Costo ($)", "Empresa", "Sucursal", "Tipo de consumo", "Proveedor", "Subcategoría", "Estado", "Origen"],
     "N° de cliente":["Número de cliente", "Empresa", "Sucursal", "Tipo de consumo", "Proveedor"],
     "Fill out":     ["Submission ID", "Submission time", "Nombre Usuario", "Nombre sucursal", "Mes de registro", "N° trabajadores", "N° trabajadoras", "m2 totales", "% Avance", "URL Excel Petróleo", "URL Excel Gas", "Procesado"],
     // Flujo "Tomar foto" — una fila por foto subida; pendiente hasta que se completen datos.
@@ -93,9 +88,6 @@ function doGet(e) {
     if (action === "getMedidores")       return jsonOut(getSheetRows("Medidores"));
     if (action === "getLecturasMedidor") return jsonOut(getSheetRows("Lecturas Medidor"));
     if (action === "getPreciosMedidor")  return jsonOut(getSheetRows("Precios Medidor"));
-    // Solo lectura: reporta si la columna ID de cada hoja de registros está
-    // libre. Útil para revisar ANTES de correr el backfill (ensureRecordIds).
-    if (action === "inspectRecordIds") return jsonOut(inspectRecordIdColumns());
     if (action === "ping") return jsonOut({ ok: true, pong: new Date().toISOString(), version: SCRIPT_VERSION });
     return jsonOut({ error: "unknown action: " + action });
   } catch (err) {
@@ -150,17 +142,6 @@ function doPost(e) {
     if (action === "update") {
       withLock(function () { updateCell(body.sheet, body.row, body.col, body.value); });
       return jsonOut({ ok: true });
-    }
-    // Edición por clave estable. Falla explícito si la fila ya no existe, en vez
-    // de escribir en la que quedó en esa posición.
-    if (action === "updateById") {
-      var upd = withLock(function () {
-        return updateCellById(body.sheet, body.id, body.col, body.value);
-      });
-      return jsonOut({ ok: true, row: upd.row });
-    }
-    if (action === "ensureRecordIds") {
-      return jsonOut(withLock(function () { return ensureRecordIds(); }));
     }
     if (action === "init") {
       withLock(function () { ensureSheets(); });
@@ -221,19 +202,7 @@ function appendRows(sheetName, values) {
     if (headers) sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   }
   const start = sheet.getLastRow() + 1;
-  // Las filas nuevas nacen con su ID: quedan editables desde la app en cuanto
-  // el dashboard se recarga, sin esperar un ensureRecordIds().
-  const idCol = RECORD_ID_COL[sheetName];
-  const rows = values.map(function (r) { return r.slice(); });
-  if (idCol) {
-    rows.forEach(function (r, i) {
-      while (r.length < idCol) r.push("");
-      if (String(r[idCol - 1] || "").trim() === "") r[idCol - 1] = newRecordId(i);
-    });
-  }
-  const width = rows.reduce(function (w, r) { return Math.max(w, r.length); }, 0);
-  rows.forEach(function (r) { while (r.length < width) r.push(""); });
-  sheet.getRange(start, 1, rows.length, width).setValues(rows);
+  sheet.getRange(start, 1, values.length, values[0].length).setValues(values);
 }
 
 function updateCell(sheetName, row, col, value) {
@@ -243,170 +212,6 @@ function updateCell(sheetName, row, col, value) {
   const sheet = ss.getSheetByName(sheetName);
   if (!sheet) throw new Error("sheet not found: " + sheetName);
   sheet.getRange(row, col).setValue(value);
-}
-
-// ----- Registros: clave estable por fila ----------------------------------
-// Hasta v4 la app editaba celdas por NÚMERO DE FILA, calculado desde la
-// posición del registro en la lectura. Si alguien borraba u ordenaba filas a
-// mano en la planilla, todos los clientes abiertos quedaban con los índices
-// corridos y la siguiente edición escribía en la fila equivocada, en silencio.
-// Ahora cada fila lleva un ID en la última columna y se edita por ese ID.
-
-// Columnas ID que este script genera y rellena (ensureRecordIds).
-var RECORD_ID_COL = {
-  "Combustible":  11,
-  "Electricidad": 12,
-  "Agua":         13,
-};
-
-// Columna clave para ubicar una fila en updateCellById. Incluye hojas que ya
-// traían una clave natural y por lo tanto no necesitan backfill: en "Fotos" el
-// "File ID" de Drive es único por foto.
-var KEY_COL = {
-  "Combustible":  11,
-  "Electricidad": 12,
-  "Agua":         13,
-  "Fotos":        1,
-};
-
-var __recIdSeq = 0;
-function newRecordId(extra) {
-  __recIdSeq++;
-  return "r" + new Date().getTime().toString(36) + "_" + __recIdSeq +
-    (extra != null ? "_" + extra : "") +
-    Math.random().toString(36).slice(2, 6);
-}
-
-// Un ID generado por este script. Sirve para distinguir "la columna ya es de
-// IDs" de "la columna tiene datos de otra cosa y no la podemos usar".
-function _looksLikeRecordId(v) {
-  return /^r[0-9a-z]+_\d+/.test(String(v == null ? "" : v).trim());
-}
-
-// Revisa, sin escribir nada, si la columna ID de cada hoja de registros está
-// libre. Si alguien tenía datos propios en esa columna hay que moverlos antes:
-// el backfill se niega a tocar esa hoja.
-function inspectRecordIdColumns() {
-  var ss = SpreadsheetApp.openById(WEB_CFG.SPREADSHEET_ID);
-  var out = {};
-  Object.keys(RECORD_ID_COL).forEach(function (name) {
-    var idCol = RECORD_ID_COL[name];
-    var info = {
-      columna: _colLetter(idCol),
-      encabezado: "",
-      filasConDatos: 0,
-      ajenos: 0,
-      muestras: [],
-      libre: true,
-    };
-    out[name] = info;
-    var sheet = ss.getSheetByName(name);
-    if (!sheet) { info.existe = false; return; }
-    info.existe = true;
-    info.encabezado = String(sheet.getRange(1, idCol).getValue() || "").trim();
-    var lastRow = sheet.getLastRow();
-    if (lastRow < 2) return;
-    var ids = sheet.getRange(2, idCol, lastRow - 1, 1).getValues();
-    for (var i = 0; i < ids.length; i++) {
-      var v = String(ids[i][0] == null ? "" : ids[i][0]).trim();
-      if (v === "") continue;
-      info.filasConDatos++;
-      if (_looksLikeRecordId(v)) continue;
-      info.ajenos++;
-      if (info.muestras.length < 3) info.muestras.push({ fila: i + 2, valor: v });
-    }
-    info.libre = info.ajenos === 0;
-  });
-  return { ok: true, columnas: out };
-}
-
-function _colLetter(n) {
-  var s = "";
-  while (n > 0) { var m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); }
-  return s;
-}
-
-// Rellena los ID vacíos de las hojas de registros. Idempotente: si no hay
-// huecos no escribe nada. Cubre las filas que existían antes de esta versión y
-// las que agregues a mano en la planilla.
-//
-// Si la columna ID de una hoja tiene datos que NO son IDs generados por este
-// script, esa hoja se salta por completo y se reporta en `bloqueadas`. Nunca
-// sobreescribe contenido ajeno.
-function ensureRecordIds() {
-  var ss = SpreadsheetApp.openById(WEB_CFG.SPREADSHEET_ID);
-  var inspection = inspectRecordIdColumns().columnas;
-  var filled = {};
-  var blocked = {};
-  Object.keys(RECORD_ID_COL).forEach(function (name) {
-    filled[name] = 0;
-    var info = inspection[name];
-    if (!info || !info.existe) return;
-    if (!info.libre) {
-      blocked[name] = {
-        columna: info.columna,
-        ajenos: info.ajenos,
-        muestras: info.muestras,
-        motivo: "la columna " + info.columna + " de \"" + name + "\" tiene datos que no son IDs; muévelos antes",
-      };
-      return;
-    }
-    var sheet = ss.getSheetByName(name);
-    var idCol = RECORD_ID_COL[name];
-    var headers = WEB_CFG.HEADERS[name];
-
-    // Encabezados en blanco: se rellenan desde WEB_CFG.HEADERS. Solo los
-    // vacíos — un encabezado renombrado a mano se respeta. Ayuda a quien edita
-    // la planilla directamente (p. ej. "Estado" de Electricidad estaba vacío).
-    var hdr = sheet.getRange(1, 1, 1, headers.length).getValues()[0];
-    var hdrChanged = false;
-    for (var h = 0; h < headers.length; h++) {
-      if (String(hdr[h] == null ? "" : hdr[h]).trim() === "") { hdr[h] = headers[h]; hdrChanged = true; }
-    }
-    if (hdrChanged) sheet.getRange(1, 1, 1, headers.length).setValues([hdr]);
-
-    var lastRow = sheet.getLastRow();
-    if (lastRow < 2) return;
-    var range = sheet.getRange(2, idCol, lastRow - 1, 1);
-    var ids = range.getValues();
-    var changed = false;
-    // Solo se rellenan filas con contenido real: las vacías se dejan como están
-    // para no ensuciar la hoja con IDs sueltos.
-    var body = sheet.getRange(2, 1, lastRow - 1, Math.max(idCol - 1, 1)).getValues();
-    for (var i = 0; i < ids.length; i++) {
-      if (String(ids[i][0] || "").trim() !== "") continue;
-      var hasContent = body[i].some(function (c) { return String(c == null ? "" : c).trim() !== ""; });
-      if (!hasContent) continue;
-      ids[i][0] = newRecordId(i);
-      changed = true;
-      filled[name]++;
-    }
-    if (changed) range.setValues(ids);
-  });
-  return { ok: true, filled: filled, blocked: blocked };
-}
-
-// Edita una celda ubicando la fila por su ID. Si el ID no está, NO escribe:
-// lanza error para que la app avise en vez de corromper otra fila.
-function updateCellById(sheetName, id, col, value) {
-  if (!sheetName) throw new Error("sheet name missing");
-  if (!id) throw new Error("record id missing");
-  if (!col) throw new Error("col missing");
-  var idCol = KEY_COL[sheetName];
-  if (!idCol) throw new Error("hoja sin columna clave: " + sheetName);
-  var ss = SpreadsheetApp.openById(WEB_CFG.SPREADSHEET_ID);
-  var sheet = ss.getSheetByName(sheetName);
-  if (!sheet) throw new Error("sheet not found: " + sheetName);
-  var lastRow = sheet.getLastRow();
-  if (lastRow < 2) throw new Error("registro no encontrado: " + id);
-  var ids = sheet.getRange(2, idCol, lastRow - 1, 1).getValues();
-  for (var i = 0; i < ids.length; i++) {
-    if (String(ids[i][0]).trim() === String(id).trim()) {
-      sheet.getRange(i + 2, col).setValue(value);
-      return { ok: true, row: i + 2 };
-    }
-  }
-  throw new Error("registro no encontrado: " + id);
 }
 
 // `subfolders` (opcional): ruta de subcarpetas bajo folderId, ej ["Medidor 1 (N° 123)", "2026-07"].
