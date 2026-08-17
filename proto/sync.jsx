@@ -7,17 +7,20 @@
 // Para desplegar el backend ver `apps-script.gs` en la raíz del proyecto y
 // pegar la URL resultante en APPS_SCRIPT_URL más abajo.
 
-// === Instancia: SIN CONFIGURAR ============================================
-// Backend des-asociado. Pegar los valores de la nueva planilla / Apps Script /
-// carpetas Drive antes de desplegar. Con estos placeholders vacíos la app corre
-// en modo local (sin sincronización a Sheets/Drive).
+// === Instancia: LEVEL =====================================================
+// Copia destinada a la empresa "Level". Backend des-asociado: reemplazar los
+// placeholders PEGAR_*_LEVEL con los valores de la planilla / Apps Script /
+// carpetas Drive de Level antes de desplegar a Pages.
+//
+// Mientras APPS_SCRIPT_URL no contenga "script.google.com" la app corre en modo
+// local (sin sincronización a Sheets/Drive) — ver rcEndpointConfigured() abajo.
+// Eso es a propósito: evita que esta copia escriba en la planilla de Base.
 const RC_CONFIG = {
-  // 👉 URL /exec del Apps Script desplegado sobre la nueva planilla.
-  APPS_SCRIPT_URL: "https://script.google.com/macros/s/AKfycbxP25MmfKXbCQJzh1gj2KCkMjOMLGLLs6zuWcZdPTQ58_E9prlNfhXwThVIaLFyPANu/exec",
+  // 👉 URL /exec del Apps Script desplegado sobre la planilla de Level.
+  APPS_SCRIPT_URL: "PEGAR_APPS_SCRIPT_URL_LEVEL",
 
-  // 👉 URL completa de la planilla de destino.
-  SPREADSHEET_URL:
-    "https://docs.google.com/spreadsheets/d/1e6v7yPP05w05OIfsHRyyU3cfXXDPhVzg43TL_HvXihU",
+  // 👉 URL completa de la planilla de Level.
+  SPREADSHEET_URL: "PEGAR_SPREADSHEET_URL_LEVEL",
 
   SHEETS: {
     COMBUSTIBLE: "Combustible",
@@ -29,41 +32,45 @@ const RC_CONFIG = {
     MED_PRECIOS:   "Precios Medidor",
   },
 
+  // 👉 Carpetas de Drive de Level. Las de Fotos y Medidores son obligatorias:
+  // con un folderId vacío uploadFile lanza "folderId missing" (apps-script.gs).
   FOLDERS: {
     // Flujo "Tomar foto".
-    FOTOS_POR_COMPLETAR: "1mq1U7vk_seU9pwYeGBX0j8xEJbXbSoYh",
-    FOTOS_PROCESADOS:    "1-CJqu2-qIiodYwh-KBkeuAnASzC0w4PP",
+    FOTOS_POR_COMPLETAR: "PEGAR_FOTOS_POR_COMPLETAR_LEVEL",
+    FOTOS_PROCESADOS:    "PEGAR_FOTOS_PROCESADOS_LEVEL",
     // Facturas adjuntas en registro manual.
-    MANUAL_FACTURAS:     "1nsr_3rHFGz2qUtOLdGbp3limmyQKTV7b",
+    MANUAL_FACTURAS:     "PEGAR_MANUAL_FACTURAS_LEVEL",
     // Fallback para "Subir documento" cuando el proveedor no tiene folder propio.
-    UPLOAD_FACTURAS:     "1QcLsiuOBTxBE5SuSeC-A93hxpT6DpQ3Z",
+    // Opcional: vacío hace caer todo a MANUAL_FACTURAS.
+    UPLOAD_FACTURAS:     "",
     // Módulo Medidores — adjuntos por medidor/mes.
-    // Carpetas bajo Sandbox/Documentos de Pago y Sandbox/Fotos Medidores.
-    MEDIDOR_FACTURAS:   "1wiseH6N8rOq2d-81XXoGGHTUm4lB_hRB",
-    MEDIDOR_PAGOS:      "1wXMGHY8g7WGei3b754568vDzgvkQnwGw",
+    MEDIDOR_FACTURAS:   "PEGAR_MEDIDOR_FACTURAS_LEVEL",
+    MEDIDOR_PAGOS:      "PEGAR_MEDIDOR_PAGOS_LEVEL",
     // Fotos de respaldo de lecturas (registro móvil) — una carpeta por tipo.
     MEDIDOR_RESPALDOS: {
-      agua:         "1DTNzlz85y4FXqO9EKcJ68gArxXfkWSlO",
-      combustible:  "13gqEJm0oylbuscpROLcvNh5bcEYGVlVF",
-      electricidad: "10h5JiwxfUYjl8gtHI0-vTBNVTJEqGcEO",
+      agua:         "PEGAR_MEDIDOR_RESPALDO_AGUA_LEVEL",
+      combustible:  "PEGAR_MEDIDOR_RESPALDO_COMBUSTIBLE_LEVEL",
+      electricidad: "PEGAR_MEDIDOR_RESPALDO_ELECTRICIDAD_LEVEL",
     },
   },
   // Folders dedicados por proveedor para "Subir documento". Cada entrada:
   //   { porProcesar: "<id>", procesados: "<id>" }
   // Si una entrada falta o tiene IDs vacíos, ese proveedor usa MANUAL_FACTURAS /
   // UPLOAD_FACTURAS como fallback y NO mueve a "procesados".
+  // Vacías por ahora: Level cae al fallback MANUAL_FACTURAS y no mueve nada a
+  // "procesados". Llenar solo si Level quiere carpeta propia por proveedor.
   PROVIDER_FOLDERS: {
-    "enel":            { porProcesar: "14lxouOWby_LLGc2MP-sgFNtz3ND602JF", procesados: "1_XmUG4S-Xj5YXRM0F6yUG5MwfUJnYyS1" },
-    "cge":             { porProcesar: "1S_LM0JZQiPK11ZIitZh_-6ogaBQC3T4F", procesados: "1r031w14aO9qwDgdJ1MdUT1yeUJfor7ji" },
-    "aguas-andinas":   { porProcesar: "1rh7kUuXYcPgdOxASZwKqeBmL4tCQ6Bh4", procesados: "1Cw8cbfTQ06apvR3bfSqS4XUO6X30BvOm" },
-    "aguas-del-valle": { porProcesar: "1odsbmsHQXLEEPL9K4jKTjpgDBOlucdpJ", procesados: "1aqKBvO70VkyenEKOGma9QpTSVHduHjVo" },
-    "esval":           { porProcesar: "1dTplQEdsSRdqkNyQnR9j3N84l3cUf4Qb", procesados: "1TZ75kRnHhJqssv7wmUIrEW1_ULXsHW83" },
-    "iconstruye-pet":  { porProcesar: "1kpDkya1QbVKvFuB8SWlkScaba875Cl9Z", procesados: "16MUXcVYLMZgqXpIvcocb3OCVy8PApN2a" },
-    "copec":           { porProcesar: "180AC7vM54Eyy5utNbbpB8FopdWltDPlw", procesados: "1Rwmm4d0x7Tw3nclUQmGFW2ExcNaDGW1m" },
-    "shell":           { porProcesar: "1BzkTxGAMtwKI_iqhrfSUINCg5yPk3DU0", procesados: "1CtP5yF9MhpYV9MsfzJRW-1V-JjDDcTrw" },
+    "enel":            { porProcesar: "", procesados: "" },
+    "cge":             { porProcesar: "", procesados: "" },
+    "aguas-andinas":   { porProcesar: "", procesados: "" },
+    "aguas-del-valle": { porProcesar: "", procesados: "" },
+    "esval":           { porProcesar: "", procesados: "" },
+    "iconstruye-pet":  { porProcesar: "", procesados: "" },
+    "copec":           { porProcesar: "", procesados: "" },
+    "shell":           { porProcesar: "", procesados: "" },
   },
 
-  EMPRESA: "Base",
+  EMPRESA: "Level",
 };
 
 // ----- Endpoint helpers ---------------------------------------------------
