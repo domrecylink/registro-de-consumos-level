@@ -44,7 +44,7 @@
 // Versión del script desplegado. Subir en cada cambio; se devuelve en `ping`
 // para verificar por curl qué versión corre en el /exec (evita pegar un
 // archivo viejo). Snapshot congelado en appscripts/vN_fecha.gs.
-const SCRIPT_VERSION = "v5";
+const SCRIPT_VERSION = "v6";
 
 // WEB_CFG en vez de CONFIG porque el procesador de Combustible (archivo Código.gs
 // en el proyecto Apps Script) ya declara `var CONFIG`. Si usáramos el mismo nombre
@@ -164,8 +164,9 @@ function doPost(e) {
       return jsonOut(withLock(function () { return ensureRecordIds(); }));
     }
     if (action === "init") {
-      withLock(function () { ensureSheets(); });
-      return jsonOut({ ok: true });
+      // Devuelve las hojas resultantes: sirve para verificar por curl que la
+      // planilla quedó completa sin abrirla.
+      return jsonOut(withLock(function () { return ensureSheets(); }));
     }
     // --- Drive / mail: sin lock (cada archivo es independiente, no hay carrera) ---
     if (action === "upload") {
@@ -444,6 +445,13 @@ function deleteFile(fileId) {
   DriveApp.getFileById(fileId).setTrashed(true);
 }
 
+// Crea las hojas que faltan, con sus encabezados. Idempotente: una hoja que ya
+// existe no se toca (ni sus encabezados, por si alguien renombró alguno a mano).
+//
+// WEB_CFG.HEADERS no cubre las tres hojas que antes se creaban solas en la
+// primera escritura (Config, Config Sucursales, Emisiones): sus encabezados viven
+// en sus propias constantes. Se agregan acá para que una planilla nueva quede
+// completa de una vez, en vez de ir apareciendo hojas a medida que se usa la app.
 function ensureSheets() {
   const ss = SpreadsheetApp.openById(WEB_CFG.SPREADSHEET_ID);
   Object.keys(WEB_CFG.HEADERS).forEach(function (name) {
@@ -453,6 +461,13 @@ function ensureSheets() {
       sh.getRange(1, 1, 1, headers.length).setValues([headers]);
     }
   });
+  // Reutiliza los creadores que ya existen para no duplicar los encabezados.
+  _configSucSheet();                      // "Config Sucursales"
+  _sheetWithHeaders(EMISSIONS_SHEET);     // "Emisiones"
+  if (!ss.getSheetByName("Config")) {     // store key/value (setConfigValue)
+    ss.insertSheet("Config").getRange(1, 1, 1, 2).setValues([["key", "value"]]);
+  }
+  return { ok: true, hojas: ss.getSheets().map(function (s) { return s.getName(); }) };
 }
 
 // ----- Config key/value store (hoja "Config") ----------------------------
