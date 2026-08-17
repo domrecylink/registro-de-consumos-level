@@ -10,7 +10,7 @@
  * --- CÓMO DESPLEGAR ---
  *
  * 1. Abre la planilla de destino (la de Level):
- *    PEGAR_SPREADSHEET_URL_LEVEL
+ *    https://docs.google.com/spreadsheets/d/1ERuuOcBr6cLdRrrlOxraR-KJLWj1zzVgxEsMROkh5Qo
  *
  * 2. Menú: Extensiones > Apps Script
  *
@@ -51,15 +51,15 @@ const SCRIPT_VERSION = "v5";
 // Apps Script lanza "Identifier 'CONFIG' has already been declared". Convivimos.
 const WEB_CFG = {
   // 👉 ID de la planilla de Level (el tramo de la URL entre /d/ y /edit).
-  SPREADSHEET_ID: "PEGAR_SPREADSHEET_ID_LEVEL",
+  SPREADSHEET_ID: "1ERuuOcBr6cLdRrrlOxraR-KJLWj1zzVgxEsMROkh5Qo",
   FOLDERS: {
     ENEL_POR_PROCESAR:  "",
     ENEL_PROCESADOS:    "",
     AGUAS_POR_PROCESAR: "",
     AGUAS_PROCESADOS:   "",
     // Deben coincidir con RC_CONFIG.FOLDERS en proto/sync.jsx.
-    FOTOS_POR_COMPLETAR:"PEGAR_FOTOS_POR_COMPLETAR_LEVEL",
-    FOTOS_PROCESADOS:   "PEGAR_FOTOS_PROCESADOS_LEVEL",
+    FOTOS_POR_COMPLETAR:"17_LKh2_KbegUz0iiYUdp-xnIW93K3n_U",
+    FOTOS_PROCESADOS:   "14pqRjjXTABR64zVKGDNj3iW0Qyq7MJlF",
   },
   HEADERS: {
     // "ID" va AL FINAL a propósito: agregarla no corre ninguna columna, así

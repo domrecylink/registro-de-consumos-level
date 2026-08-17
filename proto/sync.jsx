@@ -20,7 +20,9 @@ const RC_CONFIG = {
   APPS_SCRIPT_URL: "PEGAR_APPS_SCRIPT_URL_LEVEL",
 
   // 👉 URL completa de la planilla de Level.
-  SPREADSHEET_URL: "PEGAR_SPREADSHEET_URL_LEVEL",
+  //    (carpeta Drive: .../Level, junto a las subcarpetas de adjuntos.)
+  SPREADSHEET_URL:
+    "https://docs.google.com/spreadsheets/d/1ERuuOcBr6cLdRrrlOxraR-KJLWj1zzVgxEsMROkh5Qo",
 
   SHEETS: {
     COMBUSTIBLE: "Combustible",
@@ -36,21 +38,21 @@ const RC_CONFIG = {
   // con un folderId vacío uploadFile lanza "folderId missing" (apps-script.gs).
   FOLDERS: {
     // Flujo "Tomar foto".
-    FOTOS_POR_COMPLETAR: "PEGAR_FOTOS_POR_COMPLETAR_LEVEL",
-    FOTOS_PROCESADOS:    "PEGAR_FOTOS_PROCESADOS_LEVEL",
+    FOTOS_POR_COMPLETAR: "17_LKh2_KbegUz0iiYUdp-xnIW93K3n_U",
+    FOTOS_PROCESADOS:    "14pqRjjXTABR64zVKGDNj3iW0Qyq7MJlF",
     // Facturas adjuntas en registro manual.
-    MANUAL_FACTURAS:     "PEGAR_MANUAL_FACTURAS_LEVEL",
+    MANUAL_FACTURAS:     "1h_-0N4kMGl_HoLUw25GrFy01a5jfmkEF",
     // Fallback para "Subir documento" cuando el proveedor no tiene folder propio.
     // Opcional: vacío hace caer todo a MANUAL_FACTURAS.
     UPLOAD_FACTURAS:     "",
     // Módulo Medidores — adjuntos por medidor/mes.
-    MEDIDOR_FACTURAS:   "PEGAR_MEDIDOR_FACTURAS_LEVEL",
-    MEDIDOR_PAGOS:      "PEGAR_MEDIDOR_PAGOS_LEVEL",
+    MEDIDOR_FACTURAS:   "1X7S5q3w1GRwykAdATEwEf_m6xE1k2-fT",
+    MEDIDOR_PAGOS:      "1wKKsflOSl7Myo_tNmtImFlWU7712A0gX",
     // Fotos de respaldo de lecturas (registro móvil) — una carpeta por tipo.
     MEDIDOR_RESPALDOS: {
-      agua:         "PEGAR_MEDIDOR_RESPALDO_AGUA_LEVEL",
-      combustible:  "PEGAR_MEDIDOR_RESPALDO_COMBUSTIBLE_LEVEL",
-      electricidad: "PEGAR_MEDIDOR_RESPALDO_ELECTRICIDAD_LEVEL",
+      agua:         "1RTYCFZrGvtPKwl-xYS2_Z72z6fYSl0HM",
+      combustible:  "1GDceh9VbLvwocZH8J2k5jsmDKVWg_GWj",
+      electricidad: "1UIC1ChJJibhf1Yp5gGB7aB3xwQ_BP8sF",
     },
   },
   // Folders dedicados por proveedor para "Subir documento". Cada entrada:
