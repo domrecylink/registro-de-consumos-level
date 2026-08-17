@@ -8,16 +8,16 @@
 // pegar la URL resultante en APPS_SCRIPT_URL más abajo.
 
 // === Instancia: LEVEL =====================================================
-// Copia destinada a la empresa "Level". Backend des-asociado: reemplazar los
-// placeholders PEGAR_*_LEVEL con los valores de la planilla / Apps Script /
-// carpetas Drive de Level antes de desplegar a Pages.
+// Copia destinada a la empresa "Level", conectada a su propia planilla, sus
+// propias carpetas de Drive y su propio Apps Script (backend v6, desplegado el
+// 2026-08-17). Nada de acá toca la planilla de Base.
 //
-// Mientras APPS_SCRIPT_URL no contenga "script.google.com" la app corre en modo
-// local (sin sincronización a Sheets/Drive) — ver rcEndpointConfigured() abajo.
-// Eso es a propósito: evita que esta copia escriba en la planilla de Base.
+// Si alguna vez hay que des-asociar el backend, basta con que APPS_SCRIPT_URL
+// deje de contener "script.google.com": la app cae a modo local (sin
+// sincronización a Sheets/Drive) — ver rcEndpointConfigured() abajo.
 const RC_CONFIG = {
   // 👉 URL /exec del Apps Script desplegado sobre la planilla de Level.
-  APPS_SCRIPT_URL: "PEGAR_APPS_SCRIPT_URL_LEVEL",
+  APPS_SCRIPT_URL: "https://script.google.com/macros/s/AKfycbz_TJKV7Dm_VuZxaT7cpghlNAmJIylb6E5HoNW_oAEOCxQLrT2_-B9iIV8KFr19VNUE/exec",
 
   // 👉 URL completa de la planilla de Level.
   //    (carpeta Drive: .../Level, junto a las subcarpetas de adjuntos.)
