@@ -3,9 +3,13 @@
 Registro de lo que **esta instancia** tiene desplegado. `SCRIPT_VERSION` en
 `apps-script.gs` = versión activa, verificable con `?action=ping`.
 
-| Versión | Fecha | Estado |
-|---------|-------|--------|
-| v5 | 2026-08-17 | Primera y única implementación de Level. |
+| Versión | Fecha | Snapshot | Estado |
+|---------|-------|----------|--------|
+| v5 | 2026-08-17 | `v5_2026-08-17.gs` | Primera y única implementación de Level. |
+
+El archivo que se pega en el editor de Apps Script es **`apps-script.gs` en la
+raíz del repo** — ese es el código vivo. El snapshot de acá es su copia
+congelada, idéntica byte a byte mientras Level siga en v5.
 
 Level nació sobre la generación **v5** del backend de la plantilla
 (`registro-de-consumos-base`), así que su primer despliegue ya es v5: no hay que
@@ -14,13 +18,13 @@ implementó acá — es lo que permite comparar por `ping` si Level y Base corre
 mismo backend, que es justo lo que importa al portar un arreglo con
 `git fetch base`.
 
-Los snapshots `vN_fecha.gs` de la plantilla no se copiaron: eran el historial de
+Los snapshots v1…v4 de la plantilla no se copiaron: eran el historial de
 despliegues sobre la planilla de **Base** y llevaban su `SPREADSHEET_ID` adentro,
 así que pegar uno por error habría hecho que Level escribiera en la planilla de
-otro cliente. Acá empiezan a acumularse recién cuando Level pase a v6: al subir
-`SCRIPT_VERSION`, congelar el archivo saliente como `appscripts/vN_fecha.gs` y
-agregar su fila arriba. Para el historial anterior a v5, ver el changelog de la
-plantilla.
+otro cliente. Para ese historial, ver el changelog de la plantilla.
+
+Al pasar a v6: congelar el archivo saliente como `appscripts/vN_fecha.gs`, subir
+`SCRIPT_VERSION` en la raíz y agregar la fila arriba.
 
 ## Primer despliegue
 
